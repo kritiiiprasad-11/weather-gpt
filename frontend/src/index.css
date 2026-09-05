@@ -1,0 +1,173 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --sev: #1e5468; /* recoloured at runtime by the current alert severity */
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: #08222c;
+    color: #dce7e7;
+    font-family: 'Archivo', 'Noto Sans Devanagari', 'Noto Sans Tamil',
+      'Noto Sans Bengali', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Instrument readouts must not jitter as digits change. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  :focus-visible {
+    outline: 2px solid #4fc3d9;
+    outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1e5468;
+    border-radius: 4px;
+  }
+}
+
+@layer components {
+  /* The one bold move: the app's top edge carries the live hazard colour. */
+  .severity-edge {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--sev) 15%,
+      var(--sev) 85%,
+      transparent
+    );
+  }
+
+  .rule {
+    border-color: #1e5468;
+  }
+
+  /* ---------------------------------------------------------------------
+     Draggable map drawer.
+     .map-drawer        the panel itself
+     .map-drawer-handle the grab strip (left edge on desktop, top on mobile)
+     .map-drawer-grip   the visible grip marks inside the handle
+     .map-drawer-body   wrapper that holds the Leaflet canvas
+     .is-resizing       set on .map-drawer while a drag is in progress
+     --------------------------------------------------------------------- */
+  .map-drawer {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .map-drawer-handle {
+    position: absolute;
+    z-index: 500; /* above Leaflet panes, which sit at 400 */
+    display: grid;
+    place-items: center;
+    touch-action: none;
+    background: transparent;
+    transition: background 140ms ease;
+  }
+
+  /* Desktop: a vertical strip on the drawer's left edge. */
+  @media (min-width: 1024px) {
+    .map-drawer-handle {
+      inset: 0 auto 0 0;
+      width: 10px;
+      margin-left: -5px;
+      cursor: col-resize;
+    }
+    .map-drawer-grip {
+      width: 2px;
+      height: 34px;
+      border-radius: 1px;
+    }
+  }
+
+  /* Below lg the drawer is a bottom sheet, so the handle runs along its top. */
+  @media (max-width: 1023.98px) {
+    .map-drawer-handle {
+      inset: 0 0 auto 0;
+      height: 16px;
+      margin-top: -6px;
+      cursor: row-resize;
+    }
+    .map-drawer-grip {
+      width: 36px;
+      height: 3px;
+      border-radius: 2px;
+    }
+  }
+
+  .map-drawer-grip {
+    display: block;
+    background: #1e5468;
+    transition: background 140ms ease;
+  }
+
+  .map-drawer-handle:hover .map-drawer-grip,
+  .map-drawer-handle:focus-visible .map-drawer-grip,
+  .map-drawer.is-resizing .map-drawer-grip {
+    background: #4fc3d9;
+  }
+
+  .map-drawer-handle:focus-visible {
+    outline: 2px solid #4fc3d9;
+    outline-offset: -2px;
+  }
+
+  /* Suppress map interaction and transitions mid-drag so it tracks the
+     pointer instead of fighting Leaflet's own handlers. */
+  .map-drawer.is-resizing .map-drawer-body {
+    pointer-events: none;
+  }
+}
+
+/* Leaflet inherits the dark palette rather than shipping its default chrome. */
+.leaflet-container {
+  background: #0e3240;
+  font-family: inherit;
+}
+
+/* OSM ships a light basemap. Invert and re-hue only the tile images so the map
+   reads as dark without touching markers, circles or controls. */
+.map-drawer-canvas .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(185deg) brightness(0.92) contrast(0.88)
+    saturate(0.55);
+}
+.leaflet-control-attribution {
+  background: rgba(8, 34, 44, 0.75) !important;
+  color: #7c9da8 !important;
+}
+.leaflet-control-attribution a {
+  color: #4fc3d9 !important;
+}
+.leaflet-bar a {
+  background: #154356 !important;
+  color: #dce7e7 !important;
+  border-color: #1e5468 !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

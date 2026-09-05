@@ -1,0 +1,23 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+httpx==0.28.1
+python-multipart==0.0.20
+
+# --- persistence (optional: skip if you run without DATABASE_URL) ---
+asyncpg==0.30.0
+
+# --- LLM layer ---
+# Install ONE provider. They pull incompatible langchain-core versions, so
+# installing two at once produces a dependency-resolver conflict.
+# Default provider: Groq running gpt-oss-120b (open weights, free tier).
+langchain-groq>=1.1.3
+
+# Swap in place of langchain-groq if you change LLM_PROVIDER:
+# langchain-google-genai>=2.0.8   # LLM_PROVIDER=gemini
+# langchain-openai>=0.2.14        # LLM_PROVIDER=openai
+# langchain-ollama>=0.2.2         # LLM_PROVIDER=ollama (fully local Llama)
+
+# --- optional server-side speech-to-text ---
+# faster-whisper==1.1.0

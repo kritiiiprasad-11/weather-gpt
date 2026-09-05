@@ -1,0 +1,37 @@
+# Render blueprint. In the Render dashboard: New > Blueprint, point it at this
+# repo, and it reads this file instead of you filling in the form by hand.
+#
+# The free plan sleeps after 15 minutes of inactivity and takes 30-60 seconds to
+# wake, so the first request after a quiet spell will feel slow. That is the
+# plan, not the app.
+
+services:
+  - type: web
+    name: weathergpt-api
+    runtime: python
+    plan: free
+    region: singapore # closest Render region to India
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    # Render injects $PORT. Binding to 0.0.0.0 is required; 127.0.0.1 will not
+    # be reachable from outside the container.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      # 3.13 has no prebuilt wheels for some deps. 3.11 is the safe choice.
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      # Set this in the dashboard, not here - never commit a key.
+      - key: GROQ_API_KEY
+        sync: false
+      # Comma-separated. Add your production Vercel URL once you have it.
+      # Preview URLs are already covered by CORS_ORIGIN_REGEX.
+      - key: CORS_ORIGINS
+        sync: false
+      # Leave unset to run without persistence.
+      - key: DATABASE_URL
+        sync: false
