@@ -14,6 +14,8 @@ engine and the React client only ever see one shape.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 
@@ -27,6 +29,37 @@ from .models import (
     ForecastPoint,
     Location,
 )
+
+log = logging.getLogger("weathergpt.weather")
+
+# Process-local response cache: key -> (expires_at_monotonic, payload).
+# _stale keeps the last good payload forever so a rate-limited request can fall
+# back to slightly old data instead of failing outright.
+_cache: dict[str, tuple[float, dict]] = {}
+_stale: dict[str, dict] = {}
+_CACHE_MAX = 512
+
+
+def _prune_cache() -> None:
+    """Drop expired entries, keeping the last good copy in _stale."""
+    now = time.monotonic()
+    for k, (expires, payload) in list(_cache.items()):
+        _stale[k] = payload
+        if expires <= now:
+            _cache.pop(k, None)
+    if len(_cache) > _CACHE_MAX:
+        for k, _ in sorted(_cache.items(), key=lambda kv: kv[1][0])[: len(_cache) - _CACHE_MAX]:
+            _cache.pop(k, None)
+    if len(_stale) > _CACHE_MAX * 2:
+        _stale.clear()
+
+
+# How long each kind of answer stays fresh. Climate baselines are the big win:
+# a ten-year average genuinely does not change during a demo.
+TTL_GEOCODE = 24 * 3600
+TTL_CURRENT = 300          # 5 minutes
+TTL_FORECAST = 900         # 15 minutes
+TTL_ARCHIVE = 24 * 3600    # reanalysis data lags by days
 
 _CARDINALS = [
     "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
@@ -67,10 +100,59 @@ class WeatherService:
             raise WeatherServiceError("HTTP client not started")
         return self._client
 
-    async def _get_json(self, url: str, params: dict) -> dict:
-        resp = await self.client.get(url, params=params)
-        resp.raise_for_status()
-        return resp.json()
+    async def _get_json(self, url: str, params: dict, *, ttl: float = 0) -> dict:
+        """GET with an in-process TTL cache and backoff on rate limits.
+
+        Open-Meteo's keyless tier is metered per IP, and on shared hosting that
+        IP is shared with strangers, so 429s happen through no fault of ours.
+        Caching is the real fix: a ten-year climate baseline does not change
+        between requests, and current conditions do not change every second.
+        """
+        key = None
+        if ttl > 0:
+            key = f"{url}?{sorted(params.items())}"
+            hit = _cache.get(key)
+            if hit and hit[0] > time.monotonic():
+                return hit[1]
+
+        delay = 1.0
+        last: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = await self.client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                if key:
+                    _cache[key] = (time.monotonic() + ttl, data)
+                    _prune_cache()
+                return data
+            except httpx.HTTPStatusError as exc:
+                last = exc
+                if exc.response.status_code not in (429, 502, 503, 504):
+                    raise
+                if attempt == 2:
+                    break
+                retry_after = exc.response.headers.get("retry-after")
+                wait = float(retry_after) if retry_after and retry_after.isdigit() else delay
+                log.warning("%s from %s, retrying in %.1fs", exc.response.status_code, url, wait)
+                await asyncio.sleep(wait)
+                delay *= 2
+            except httpx.RequestError as exc:
+                last = exc
+                if attempt == 2:
+                    break
+                await asyncio.sleep(delay)
+                delay *= 2
+
+        # Out of retries. A stale cached value beats a hard failure.
+        if key:
+            stale = _stale.get(key)
+            if stale is not None:
+                log.warning("Serving stale data for %s after repeated failures", url)
+                return stale
+        raise WeatherServiceError(
+            "The weather data provider is rate limiting us. Try again shortly."
+        ) from last
 
     # ------------------------------------------------------------------
     # Geocoding
@@ -79,6 +161,7 @@ class WeatherService:
         data = await self._get_json(
             settings.OPEN_METEO_GEOCODE,
             {"name": query, "count": count, "language": "en", "format": "json"},
+            ttl=TTL_GEOCODE,
         )
         out: list[Location] = []
         for r in data.get("results", []) or []:
@@ -118,6 +201,7 @@ class WeatherService:
                     f"{settings.OPENWEATHER_BASE}/geo/1.0/reverse",
                     {"lat": lat, "lon": lon, "limit": 1,
                      "appid": settings.OPENWEATHER_API_KEY},
+                    ttl=TTL_GEOCODE,
                 )
                 if data:
                     st = data[0].get("state")
@@ -146,6 +230,7 @@ class WeatherService:
                 "units": "metric",
                 "appid": settings.OPENWEATHER_API_KEY,
             },
+            ttl=TTL_CURRENT,
         )
         main = data.get("main", {})
         wind = data.get("wind", {})
@@ -188,6 +273,7 @@ class WeatherService:
                 "timezone": "UTC",
                 "wind_speed_unit": "kmh",
             },
+            ttl=TTL_CURRENT,
         )
         cur = data.get("current", {})
         hourly = data.get("hourly", {})
@@ -232,6 +318,7 @@ class WeatherService:
                     "forecast_hours": 1,
                     "timezone": "UTC",
                 },
+                ttl=TTL_CURRENT,
             )
             vals = [p for p in data["hourly"]["surface_pressure"] if p is not None]
             if len(vals) >= 4:
@@ -259,6 +346,7 @@ class WeatherService:
                 "timezone": "auto",
                 "wind_speed_unit": "kmh",
             },
+            ttl=TTL_FORECAST,
         )
         h = data.get("hourly", {})
         points: list[ForecastPoint] = []
@@ -295,6 +383,10 @@ class WeatherService:
         """
         today = datetime.now(timezone.utc).date()
         samples: list[float] = []
+        # ~11 km grid. Climate normals do not vary meaningfully inside one
+        # grid cell, and rounding makes nearby users share cache entries
+        # instead of each triggering ten fresh archive requests.
+        glat, glon = round(loc.latitude, 1), round(loc.longitude, 1)
 
         async def one_year(y: int) -> list[float]:
             start = today.replace(year=today.year - y) - timedelta(days=5)
@@ -302,13 +394,14 @@ class WeatherService:
             data = await self._get_json(
                 settings.OPEN_METEO_ARCHIVE,
                 {
-                    "latitude": loc.latitude,
-                    "longitude": loc.longitude,
+                    "latitude": glat,
+                    "longitude": glon,
                     "start_date": start.isoformat(),
                     "end_date": end.isoformat(),
                     "daily": "temperature_2m_max",
                     "timezone": "auto",
                 },
+                ttl=TTL_ARCHIVE,
             )
             return [v for v in data["daily"]["temperature_2m_max"] if v is not None]
 
@@ -335,6 +428,7 @@ class WeatherService:
         month = month or now.month
         daily_var = "precipitation_sum" if variable == "rainfall" else "temperature_2m_mean"
         unit = "mm" if variable == "rainfall" else "°C"
+        glat, glon = round(loc.latitude, 1), round(loc.longitude, 1)
 
         async def month_value(year: int) -> tuple[int, float] | None:
             start = datetime(year, month, 1).date()
@@ -347,13 +441,14 @@ class WeatherService:
             data = await self._get_json(
                 settings.OPEN_METEO_ARCHIVE,
                 {
-                    "latitude": loc.latitude,
-                    "longitude": loc.longitude,
+                    "latitude": glat,
+                    "longitude": glon,
                     "start_date": start.isoformat(),
                     "end_date": end.isoformat(),
                     "daily": daily_var,
                     "timezone": "auto",
                 },
+                ttl=TTL_ARCHIVE,
             )
             vals = [v for v in data["daily"][daily_var] if v is not None]
             if not vals:

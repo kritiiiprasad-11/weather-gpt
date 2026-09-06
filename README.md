@@ -358,3 +358,30 @@ load over plain REST regardless.
 
 **Rebuilds.** Every push to `main` redeploys both. Vercel also builds a preview
 for each branch and pull request.
+
+---
+
+## 9. Rate limits
+
+Open-Meteo's keyless tier is metered per IP. On shared hosting like Render's
+free plan that IP is shared with other tenants, so you can be rate limited
+without doing anything wrong. The same code runs fine on localhost because your
+home IP has its own untouched quota — a difference of environment, not of code.
+
+What the service does about it:
+
+- **Response caching.** Geocoding and climate archives cache for 24 hours,
+  current conditions for 5 minutes, forecasts for 15. The archive TTL is the
+  big win: `/api/alerts` used to fire twelve requests every call, ten of them
+  rebuilding a ten-year baseline that does not change.
+- **Coordinate rounding.** Archive lookups snap to a ~11 km grid so nearby
+  users share cache entries.
+- **Retry with backoff.** 429, 502, 503 and 504 are retried three times,
+  honouring `Retry-After`.
+- **Stale fallback.** If retries are exhausted, the last good payload is served
+  rather than failing. Slightly old weather beats no weather.
+- **Slower alert polling.** `ALERT_POLL_SECONDS` defaults to 900.
+
+If you still see 429s, set `OPENWEATHER_API_KEY`. Their quota is keyed to your
+key rather than your IP, so it sidesteps the shared-address problem entirely for
+current conditions.

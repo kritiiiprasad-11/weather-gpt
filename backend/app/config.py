@@ -61,7 +61,10 @@ class Settings(BaseSettings):
     CYCLONE_WIND_KMH: float = 60.0
     STORM_WATCH_WIND_KMH: float = 40.0
     HEATWAVE_DEPARTURE_C: float = 4.5
-    ALERT_POLL_SECONDS: int = 120
+    # Each poll re-runs the threshold checks, which touch the weather API.
+    # 15 minutes is plenty for hazard warnings and keeps us well inside the
+    # free provider's rate limit.
+    ALERT_POLL_SECONDS: int = 900
 
     @property
     def cors_list(self) -> list[str]:
