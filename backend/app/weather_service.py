@@ -214,11 +214,13 @@ class WeatherService:
     # Current conditions
     # ------------------------------------------------------------------
     async def current(self, loc: Location) -> CurrentWeather:
+        """Keyed provider first when available: its quota follows the key, not
+        the IP address, which is what survives shared free hosting."""
         if settings.OPENWEATHER_API_KEY:
             try:
                 return await self._current_owm(loc)
-            except Exception:  # noqa: BLE001 - degrade to the keyless provider
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.warning("OpenWeatherMap current failed (%s), trying Open-Meteo", exc)
         return await self._current_open_meteo(loc)
 
     async def _current_owm(self, loc: Location) -> CurrentWeather:
@@ -331,6 +333,67 @@ class WeatherService:
     # Forecast
     # ------------------------------------------------------------------
     async def forecast(self, loc: Location, hours: int = 48, days: int = 7) -> Forecast:
+        """Open-Meteo first (richer fields), OpenWeatherMap as the fallback.
+
+        Open-Meteo meters by IP, which is shared on free hosting, so on a
+        rate-limited host the keyed provider is what keeps the app alive.
+        """
+        try:
+            return await self._forecast_open_meteo(loc, hours, days)
+        except WeatherServiceError:
+            if not settings.OPENWEATHER_API_KEY:
+                raise
+            log.warning("Open-Meteo forecast unavailable, falling back to OpenWeatherMap")
+            return await self._forecast_owm(loc, hours, days)
+
+    async def _forecast_owm(self, loc: Location, hours: int, days: int) -> Forecast:
+        """OWM's free 5-day/3-hour forecast, reshaped into our model."""
+        data = await self._get_json(
+            f"{settings.OPENWEATHER_BASE}/data/2.5/forecast",
+            {
+                "lat": loc.latitude,
+                "lon": loc.longitude,
+                "units": "metric",
+                "appid": settings.OPENWEATHER_API_KEY,
+            },
+            ttl=TTL_FORECAST,
+        )
+        points: list[ForecastPoint] = []
+        daily: dict[str, dict[str, float]] = {}
+        for row in data.get("list", []):
+            when = datetime.fromtimestamp(row["dt"], tz=timezone.utc)
+            main = row.get("main", {})
+            wind = row.get("wind", {})
+            rain = (row.get("rain") or {}).get("3h", 0.0)
+            points.append(
+                ForecastPoint(
+                    time=when,
+                    temperature_c=main.get("temp"),
+                    humidity_pct=main.get("humidity"),
+                    pressure_hpa=main.get("pressure"),
+                    wind_speed_kmh=round((wind.get("speed") or 0) * 3.6, 1),
+                    wind_direction_deg=wind.get("deg"),
+                    precipitation_mm=rain,
+                    precipitation_probability_pct=round((row.get("pop") or 0) * 100),
+                )
+            )
+            key = when.date().isoformat()
+            d = daily.setdefault(key, {"max": -99.0, "min": 99.0, "rain": 0.0})
+            d["max"] = max(d["max"], main.get("temp_max", main.get("temp", -99)))
+            d["min"] = min(d["min"], main.get("temp_min", main.get("temp", 99)))
+            d["rain"] += rain
+
+        dates = sorted(daily)[:days]
+        return Forecast(
+            location=loc,
+            hourly=points[:hours],
+            daily_dates=dates,
+            daily_max_c=[round(daily[d]["max"], 1) for d in dates],
+            daily_min_c=[round(daily[d]["min"], 1) for d in dates],
+            daily_rain_mm=[round(daily[d]["rain"], 1) for d in dates],
+        )
+
+    async def _forecast_open_meteo(self, loc: Location, hours: int, days: int) -> Forecast:
         data = await self._get_json(
             settings.OPEN_METEO_FORECAST,
             {
@@ -409,7 +472,8 @@ class WeatherService:
             results = await asyncio.gather(
                 *[one_year(y) for y in range(1, years + 1)], return_exceptions=True
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - no baseline just disables the rule
+            log.warning("Seasonal normal unavailable; heatwave rule will be skipped")
             return None
         for r in results:
             if isinstance(r, list):

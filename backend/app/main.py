@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import db
 from .advisories import build_for_location
@@ -62,6 +62,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(WeatherServiceError)
+async def weather_service_error_handler(request, exc: WeatherServiceError):
+    """Upstream provider problems are not our bug - say so plainly.
+
+    Without this the error escapes as a bare 500 "Internal Server Error" with
+    no message, which tells the user nothing and looks like a crash.
+    """
+    log.warning("Weather provider unavailable on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": str(exc),
+            "hint": (
+                "The keyless provider meters by IP address, which is shared on "
+                "free hosting. Setting OPENWEATHER_API_KEY uses a quota tied to "
+                "your key instead."
+            ),
+        },
+    )
 
 
 async def _resolve(place: str | None, lat: float | None, lon: float | None) -> Location:

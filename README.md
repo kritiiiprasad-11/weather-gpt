@@ -383,5 +383,10 @@ What the service does about it:
 - **Slower alert polling.** `ALERT_POLL_SECONDS` defaults to 900.
 
 If you still see 429s, set `OPENWEATHER_API_KEY`. Their quota is keyed to your
-key rather than your IP, so it sidesteps the shared-address problem entirely for
-current conditions.
+key rather than your IP, which sidesteps the shared-address problem entirely.
+With a key set, both current conditions and forecasts fall back to OWM when
+Open-Meteo refuses; only the historical archive still needs Open-Meteo, and
+that is cached for 24 hours.
+
+When every provider is exhausted the API returns **503** with a readable message
+rather than a bare 500, so the frontend can say something useful.
